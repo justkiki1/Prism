@@ -4,7 +4,10 @@ use flate2::read::GzDecoder;
 use std::io::Read;
 use std::path::Path;
 use stellar_xdr::curr::{
-    BucketEntry, LedgerHeader, LedgerHeaderHistoryEntry, LedgerKey, Limits, ReadXdr, WriteXdr,
+    BucketEntry, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerHeaderHistoryEntry, LedgerKey,
+    LedgerKeyAccount, LedgerKeyClaimableBalance, LedgerKeyConfigSetting, LedgerKeyContractCode,
+    LedgerKeyContractData, LedgerKeyData, LedgerKeyLiquidityPool, LedgerKeyOffer,
+    LedgerKeyTrustLine, LedgerKeyTtl, Limited, Limits, ReadXdr, WriteXdr,
 };
 
 #[derive(Debug)]
@@ -246,14 +249,15 @@ impl ArchiveClient {
                 file: file.clone(),
                 reason: format!("ledger key must be base64 encoded XDR: {e}"),
             })?;
-        let mut key_input = key_bytes.as_slice();
-        let wanted_key = LedgerKey::read_xdr(&mut key_input, Limits::none()).map_err(|e| {
+        let mut key_input =
+            Limited::new(std::io::Cursor::new(key_bytes.as_slice()), Limits::none());
+        let wanted_key = LedgerKey::read_xdr(&mut key_input).map_err(|e| {
             ArchiveErrorKind::MalformedXdr {
                 file: file.clone(),
                 reason: format!("failed to decode ledger key: {e}"),
             }
         })?;
-        if !key_input.is_empty() {
+        if key_input.inner.position() < key_bytes.len() as u64 {
             return Err(ArchiveErrorKind::MalformedXdr {
                 file,
                 reason: "ledger key contains trailing bytes".to_string(),
@@ -343,9 +347,11 @@ impl ArchiveClient {
                             break;
                         }
                     };
-                let mut stream = bytes.as_slice();
-                while !stream.is_empty() {
-                    let entry = BucketEntry::read_xdr(&mut stream, Limits::none()).map_err(|e| {
+                let total_len = bytes.len() as u64;
+                let mut stream =
+                    Limited::new(std::io::Cursor::new(bytes.as_slice()), Limits::none());
+                while stream.inner.position() < total_len {
+                    let entry = BucketEntry::read_xdr(&mut stream).map_err(|e| {
                         ArchiveErrorKind::MalformedXdr {
                             file: bucket_path.clone(),
                             reason: format!("failed to decode bucket entry: {e}"),
@@ -353,7 +359,7 @@ impl ArchiveClient {
                     })?;
                     match entry {
                         BucketEntry::Liveentry(entry) | BucketEntry::Initentry(entry) => {
-                            let entry_key = LedgerKey::from(&entry);
+                            let entry_key = ledger_key_for_entry(&entry);
                             if entry_key.to_xdr(Limits::none()).ok().as_deref()
                                 == Some(&wanted_key_xdr)
                             {
@@ -511,6 +517,52 @@ pub fn parse_ledger_header_stream(
 
 fn get_checkpoint_seq(ledger_sequence: u32) -> u32 {
     (ledger_sequence / 64) * 64 + 63
+}
+
+/// The ledger key that identifies `entry`, built field by field because
+/// stellar-xdr 21 has no `From<&LedgerEntry>` for `LedgerKey`.
+fn ledger_key_for_entry(entry: &LedgerEntry) -> LedgerKey {
+    match &entry.data {
+        LedgerEntryData::Account(account) => LedgerKey::Account(LedgerKeyAccount {
+            account_id: account.account_id.clone(),
+        }),
+        LedgerEntryData::Trustline(trustline) => LedgerKey::Trustline(LedgerKeyTrustLine {
+            account_id: trustline.account_id.clone(),
+            asset: trustline.asset.clone(),
+        }),
+        LedgerEntryData::Offer(offer) => LedgerKey::Offer(LedgerKeyOffer {
+            seller_id: offer.seller_id.clone(),
+            offer_id: offer.offer_id,
+        }),
+        LedgerEntryData::Data(data) => LedgerKey::Data(LedgerKeyData {
+            account_id: data.account_id.clone(),
+            data_name: data.data_name.clone(),
+        }),
+        LedgerEntryData::ClaimableBalance(balance) => {
+            LedgerKey::ClaimableBalance(LedgerKeyClaimableBalance {
+                balance_id: balance.balance_id.clone(),
+            })
+        }
+        LedgerEntryData::LiquidityPool(pool) => LedgerKey::LiquidityPool(LedgerKeyLiquidityPool {
+            liquidity_pool_id: pool.liquidity_pool_id.clone(),
+        }),
+        LedgerEntryData::ContractData(data) => LedgerKey::ContractData(LedgerKeyContractData {
+            contract: data.contract.clone(),
+            key: data.key.clone(),
+            durability: data.durability,
+        }),
+        LedgerEntryData::ContractCode(code) => LedgerKey::ContractCode(LedgerKeyContractCode {
+            hash: code.hash.clone(),
+        }),
+        LedgerEntryData::ConfigSetting(setting) => {
+            LedgerKey::ConfigSetting(LedgerKeyConfigSetting {
+                config_setting_id: setting.discriminant(),
+            })
+        }
+        LedgerEntryData::Ttl(ttl) => LedgerKey::Ttl(LedgerKeyTtl {
+            key_hash: ttl.key_hash.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]
