@@ -37,7 +37,7 @@ jobs:
         run: bash scripts/lint_taxonomy.sh
 
       - name: Run Tests
-        run: cargo test --workspace --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features --no-fail-fast
 
   node_checks:
     name: Node & Web Checks
