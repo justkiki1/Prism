@@ -283,17 +283,22 @@ async fn stream_trace_replay(
     }
 
     if !result.diagnostic_events.is_empty() {
-        let diagnostic_messages: Vec<DiagnosticEventMessage> = result
-            .diagnostic_events
-            .iter()
-            .enumerate()
-            .map(|(idx, event)| DiagnosticEventMessage {
-                event_type: event.event_type.clone(),
-                topics: event.topics.clone(),
-                data: event.data.clone(),
-                timeline_position: idx,
-            })
-            .collect();
+        use grat_core::decode::auth::scval_to_readable_string;
+
+        let diagnostic_messages: Vec<DiagnosticEventMessage> =
+            grat_core::decode::walk_diagnostic_events(&result.diagnostic_events)
+                .into_iter()
+                .enumerate()
+                .map(|(idx, event)| DiagnosticEventMessage {
+                    event_type: event.kind.to_string(),
+                    topics: event.topics.iter().map(scval_to_readable_string).collect(),
+                    data: std::collections::HashMap::from([(
+                        "value".to_string(),
+                        scval_to_readable_string(&event.data),
+                    )]),
+                    timeline_position: idx,
+                })
+                .collect();
         let _ = sender.send(TraceStreamMessage::DiagnosticEvents {
             events: diagnostic_messages,
         });
